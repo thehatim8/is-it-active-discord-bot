@@ -1,0 +1,27 @@
+{
+  "name": "is-it-active-discord-bot",
+  "version": "1.0.0",
+  "description": "Discord Bot for rich server activity analytics using Supabase",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js",
+    "deploy": "node deploy-commands.js",
+    "seed": "node scratch/inject_mock_data.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "analytics",
+    "supabase",
+    "metrics",
+    "charts"
+  ],
+  "author": "Antigravity",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.3",
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7"
+  }
+}
