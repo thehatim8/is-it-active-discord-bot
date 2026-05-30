@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { config } from './config.js';
+import { KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS } from './utils/kickDeafen.js';
 
 // Initialize Supabase client
 const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
@@ -341,6 +342,56 @@ export const db = {
       return true;
     } catch (err) {
       console.error('Error clearing bot command access rules:', err.message);
+      return false;
+    }
+  },
+
+  /**
+   * Get automatic deafen disconnect settings for a guild.
+   */
+  async getKickDeafenSettings(guildId) {
+    try {
+      const { data, error } = await supabase
+        .from('kick_deafen_settings')
+        .select('enabled, inactivity_seconds')
+        .eq('guild_id', guildId)
+        .maybeSingle();
+      if (error) throw error;
+
+      return {
+        enabled: data?.enabled ?? false,
+        inactivitySeconds: Number(data?.inactivity_seconds || KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS)
+      };
+    } catch (err) {
+      console.error('Error fetching kick-deafen settings:', err.message);
+      return {
+        enabled: false,
+        inactivitySeconds: KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS
+      };
+    }
+  },
+
+  /**
+   * Save automatic deafen disconnect settings for a guild.
+   */
+  async setKickDeafenSettings(guildId, { enabled = false, inactivitySeconds = KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS } = {}) {
+    try {
+      const seconds = Number(inactivitySeconds) || KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS;
+      const { error } = await supabase
+        .from('kick_deafen_settings')
+        .upsert(
+          {
+            guild_id: guildId,
+            enabled: Boolean(enabled),
+            inactivity_seconds: seconds,
+            updated_at: new Date().toISOString()
+          },
+          { onConflict: 'guild_id' }
+        );
+      if (error) throw error;
+      return true;
+    } catch (err) {
+      console.error('Error saving kick-deafen settings:', err.message);
       return false;
     }
   },

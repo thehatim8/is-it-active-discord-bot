@@ -1,6 +1,11 @@
 import { Client, GatewayIntentBits, Collection, ActivityType, PermissionFlagsBits } from 'discord.js';
 import { config, validateConfig } from './config.js';
 import { db } from './database.js';
+import {
+  KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS,
+  formatKickDeafenDuration,
+  isVoiceStateDeafened
+} from './utils/kickDeafen.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -26,6 +31,9 @@ const client = new Client({
 
 // Create command collection
 client.commands = new Collection();
+
+const kickDeafenTimers = new Map();
+const kickDeafenSettingsCache = new Map();
 
 function isAdministrator(interaction) {
   return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) || false;
@@ -75,6 +83,118 @@ async function commandAccessAllowed(interaction) {
   return roleIds.some(roleId => member.roles.cache.has(roleId));
 }
 
+function getKickDeafenTimerKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+
+function clearKickDeafenTimer(guildId, userId) {
+  const key = getKickDeafenTimerKey(guildId, userId);
+  const pending = kickDeafenTimers.get(key);
+  if (!pending) return;
+
+  clearTimeout(pending.timeout);
+  kickDeafenTimers.delete(key);
+}
+
+function clearKickDeafenGuildTimers(guildId) {
+  for (const key of kickDeafenTimers.keys()) {
+    if (key.startsWith(`${guildId}:`)) {
+      clearTimeout(kickDeafenTimers.get(key).timeout);
+      kickDeafenTimers.delete(key);
+    }
+  }
+}
+
+async function getKickDeafenSettings(guildId, { force = false } = {}) {
+  if (!force && kickDeafenSettingsCache.has(guildId)) {
+    return kickDeafenSettingsCache.get(guildId);
+  }
+
+  const settings = await db.getKickDeafenSettings(guildId);
+  kickDeafenSettingsCache.set(guildId, settings);
+  return settings;
+}
+
+function scheduleKickDeafenDisconnect(voiceState, settings, { reset = false } = {}) {
+  const guild = voiceState.guild;
+  const userId = voiceState.id;
+  const key = getKickDeafenTimerKey(guild.id, userId);
+
+  if (kickDeafenTimers.has(key) && !reset) {
+    return;
+  }
+
+  clearKickDeafenTimer(guild.id, userId);
+
+  const inactivitySeconds = Number(settings.inactivitySeconds);
+  const delaySeconds = Number.isFinite(inactivitySeconds) && inactivitySeconds > 0
+    ? inactivitySeconds
+    : KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS;
+  const delayMs = Math.max(1000, delaySeconds * 1000);
+  const timeout = setTimeout(async () => {
+    kickDeafenTimers.delete(key);
+
+    try {
+      const currentSettings = await getKickDeafenSettings(guild.id);
+      if (!currentSettings.enabled) return;
+
+      const currentState = guild.voiceStates.cache.get(userId);
+      if (!currentState?.channelId || !isVoiceStateDeafened(currentState) || currentState.member?.user.bot) {
+        return;
+      }
+
+      if (!currentState.member?.voice?.disconnect) {
+        return;
+      }
+
+      const reason = `Stayed deafened for ${formatKickDeafenDuration(currentSettings.inactivitySeconds)}.`;
+      await currentState.member.voice.disconnect(reason);
+    } catch (err) {
+      console.error(`Failed to disconnect deafened user ${userId} in guild ${guild.id}:`, err.message);
+    }
+  }, delayMs);
+
+  kickDeafenTimers.set(key, { timeout });
+}
+
+async function evaluateKickDeafenState(voiceState) {
+  if (!voiceState?.guild || voiceState.member?.user.bot) return;
+
+  if (!voiceState.channelId || !isVoiceStateDeafened(voiceState)) {
+    clearKickDeafenTimer(voiceState.guild.id, voiceState.id);
+    return;
+  }
+
+  const settings = await getKickDeafenSettings(voiceState.guild.id);
+  if (!settings.enabled) {
+    clearKickDeafenTimer(voiceState.guild.id, voiceState.id);
+    return;
+  }
+
+  scheduleKickDeafenDisconnect(voiceState, settings);
+}
+
+async function refreshKickDeafenGuild(guild) {
+  const settings = await getKickDeafenSettings(guild.id, { force: true });
+
+  if (!settings.enabled) {
+    clearKickDeafenGuildTimers(guild.id);
+    return settings;
+  }
+
+  for (const voiceState of guild.voiceStates.cache.values()) {
+    if (voiceState.channelId && !voiceState.member?.user.bot && isVoiceStateDeafened(voiceState)) {
+      scheduleKickDeafenDisconnect(voiceState, settings, { reset: true });
+    } else {
+      clearKickDeafenTimer(guild.id, voiceState.id);
+    }
+  }
+
+  return settings;
+}
+
+client.refreshKickDeafenGuild = refreshKickDeafenGuild;
+
 // 3. Load Commands Dynamically
 const commandsPath = path.join(__dirname, 'commands');
 const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
@@ -122,6 +242,7 @@ client.once('ready', async () => {
         }
       });
       await db.syncActiveVoiceStates(guild.id, activeStates);
+      await refreshKickDeafenGuild(guild);
     } catch (err) {
       console.error(`Failed to synchronize voice states for guild ${guild.name}:`, err.message);
     }
@@ -159,6 +280,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   else if (oldChannelId !== null && newChannelId !== null && oldChannelId !== newChannelId) {
     await db.startVoiceSession(guildId, newChannelId, userId);
   }
+
+  await evaluateKickDeafenState(newState);
 });
 
 // GUILD MEMBER ADD Event: Logs growth joins
@@ -180,6 +303,8 @@ client.on('guildCreate', async guild => {
 
 // GUILD DELETE Event: Keeps the web dashboard from showing disconnected servers
 client.on('guildDelete', async guild => {
+  clearKickDeafenGuildTimers(guild.id);
+  kickDeafenSettingsCache.delete(guild.id);
   await db.markGuildUnavailable(guild.id);
 });
 
