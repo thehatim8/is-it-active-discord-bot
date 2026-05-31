@@ -353,20 +353,22 @@ export const db = {
     try {
       const { data, error } = await supabase
         .from('kick_deafen_settings')
-        .select('enabled, inactivity_seconds')
+        .select('enabled, inactivity_seconds, whitelisted_role_id')
         .eq('guild_id', guildId)
         .maybeSingle();
       if (error) throw error;
 
       return {
         enabled: data?.enabled ?? false,
-        inactivitySeconds: Number(data?.inactivity_seconds || KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS)
+        inactivitySeconds: Number(data?.inactivity_seconds || KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS),
+        whitelistedRoleId: data?.whitelisted_role_id || null
       };
     } catch (err) {
       console.error('Error fetching kick-deafen settings:', err.message);
       return {
         enabled: false,
-        inactivitySeconds: KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS
+        inactivitySeconds: KICK_DEAFEN_DEFAULT_INACTIVITY_SECONDS,
+        whitelistedRoleId: null
       };
     }
   },
@@ -392,6 +394,29 @@ export const db = {
       return true;
     } catch (err) {
       console.error('Error saving kick-deafen settings:', err.message);
+      return false;
+    }
+  },
+
+  /**
+   * Set the role that is exempt from automatic deafen disconnects.
+   */
+  async setKickDeafenWhitelistedRole(guildId, roleId) {
+    try {
+      const { error } = await supabase
+        .from('kick_deafen_settings')
+        .upsert(
+          {
+            guild_id: guildId,
+            whitelisted_role_id: roleId,
+            updated_at: new Date().toISOString()
+          },
+          { onConflict: 'guild_id' }
+        );
+      if (error) throw error;
+      return true;
+    } catch (err) {
+      console.error('Error saving kick-deafen whitelisted role:', err.message);
       return false;
     }
   },

@@ -53,8 +53,12 @@ create table if not exists kick_deafen_settings (
   guild_id text primary key,
   enabled boolean not null default false,
   inactivity_seconds integer not null default 300 check (inactivity_seconds in (1, 60, 120, 300, 600, 1800)),
+  whitelisted_role_id text,
   updated_at timestamp with time zone not null default now()
 );
+
+alter table if exists kick_deafen_settings
+add column if not exists whitelisted_role_id text;
 
 -- 2. Create Indexes for performance
 create index if not exists idx_messages_guild_created on messages(guild_id, created_at);

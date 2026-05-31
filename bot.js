@@ -115,6 +115,27 @@ async function getKickDeafenSettings(guildId, { force = false } = {}) {
   return settings;
 }
 
+async function getVoiceStateMember(voiceState) {
+  if (voiceState.member?.roles?.cache) {
+    return voiceState.member;
+  }
+
+  return voiceState.guild.members.fetch(voiceState.id).catch(() => null);
+}
+
+function memberHasKickDeafenWhitelistedRole(member, settings) {
+  return Boolean(settings?.whitelistedRoleId && member?.roles?.cache?.has(settings.whitelistedRoleId));
+}
+
+async function isKickDeafenWhitelisted(voiceState, settings) {
+  if (!settings?.whitelistedRoleId) {
+    return false;
+  }
+
+  const member = await getVoiceStateMember(voiceState);
+  return memberHasKickDeafenWhitelistedRole(member, settings);
+}
+
 function scheduleKickDeafenDisconnect(voiceState, settings, { reset = false } = {}) {
   const guild = voiceState.guild;
   const userId = voiceState.id;
@@ -143,12 +164,21 @@ function scheduleKickDeafenDisconnect(voiceState, settings, { reset = false } = 
         return;
       }
 
-      if (!currentState.member?.voice?.disconnect) {
+      const currentMember = await getVoiceStateMember(currentState);
+      if (!currentMember?.voice?.channelId || currentMember.user.bot) {
+        return;
+      }
+
+      if (memberHasKickDeafenWhitelistedRole(currentMember, currentSettings)) {
+        return;
+      }
+
+      if (!currentMember.voice?.disconnect) {
         return;
       }
 
       const reason = `Stayed deafened for ${formatKickDeafenDuration(currentSettings.inactivitySeconds)}.`;
-      await currentState.member.voice.disconnect(reason);
+      await currentMember.voice.disconnect(reason);
     } catch (err) {
       console.error(`Failed to disconnect deafened user ${userId} in guild ${guild.id}:`, err.message);
     }
@@ -171,6 +201,11 @@ async function evaluateKickDeafenState(voiceState) {
     return;
   }
 
+  if (await isKickDeafenWhitelisted(voiceState, settings)) {
+    clearKickDeafenTimer(voiceState.guild.id, voiceState.id);
+    return;
+  }
+
   scheduleKickDeafenDisconnect(voiceState, settings);
 }
 
@@ -183,7 +218,12 @@ async function refreshKickDeafenGuild(guild) {
   }
 
   for (const voiceState of guild.voiceStates.cache.values()) {
-    if (voiceState.channelId && !voiceState.member?.user.bot && isVoiceStateDeafened(voiceState)) {
+    if (
+      voiceState.channelId &&
+      !voiceState.member?.user.bot &&
+      isVoiceStateDeafened(voiceState) &&
+      !(await isKickDeafenWhitelisted(voiceState, settings))
+    ) {
       scheduleKickDeafenDisconnect(voiceState, settings, { reset: true });
     } else {
       clearKickDeafenTimer(guild.id, voiceState.id);
@@ -288,6 +328,22 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 client.on('guildMemberAdd', async member => {
   if (member.user.bot) return;
   await db.logMemberEvent(member.guild.id, member.id, 'join');
+});
+
+// GUILD MEMBER UPDATE Event: Re-check kick-deafen timers when whitelist role membership changes
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  if (newMember.user.bot) return;
+
+  const settings = await getKickDeafenSettings(newMember.guild.id);
+  if (!settings.enabled || !settings.whitelistedRoleId) return;
+
+  const oldWhitelisted = oldMember.roles.cache.has(settings.whitelistedRoleId);
+  const newWhitelisted = newMember.roles.cache.has(settings.whitelistedRoleId);
+  if (oldWhitelisted === newWhitelisted) return;
+
+  if (newMember.voice?.channelId) {
+    await evaluateKickDeafenState(newMember.voice);
+  }
 });
 
 // GUILD MEMBER REMOVE Event: Logs growth leaves
