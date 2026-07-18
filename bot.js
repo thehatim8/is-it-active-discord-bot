@@ -6,6 +6,7 @@ import {
   formatKickDeafenDuration,
   isVoiceStateDeafened
 } from './utils/kickDeafen.js';
+import { handleAfkMessage } from './utils/afk.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -42,6 +43,11 @@ function isAdministrator(interaction) {
 async function commandAccessAllowed(interaction) {
   if (!interaction.inGuild()) {
     return false;
+  }
+
+  // AFK is a general member utility rather than an analytics/admin command.
+  if (interaction.commandName === 'afk') {
+    return true;
   }
 
   if (isAdministrator(interaction)) {
@@ -293,7 +299,8 @@ client.once('ready', async () => {
 client.on('messageCreate', async message => {
   // Ignore bots and DM messages
   if (message.author.bot || !message.guild) return;
-  
+
+  await handleAfkMessage(message);
   await db.logMessage(message.guildId, message.channelId, message.author.id);
 });
 
