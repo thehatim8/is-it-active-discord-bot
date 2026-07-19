@@ -1,7 +1,9 @@
 const afkUsers = new Map();
+const afkVoiceGraceTimers = new Map();
 
 const DEFAULT_REASON = 'No reason provided.';
 const MAX_REASON_LENGTH = 1000;
+const AFK_VOICE_GRACE_MS = 60 * 1000;
 
 function getAfkKey(guildId, userId) {
   return `${guildId}:${userId}`;
@@ -37,9 +39,39 @@ export function getAfk(guildId, userId) {
 
 export function clearAfk(guildId, userId) {
   const key = getAfkKey(guildId, userId);
+  clearAfkVoiceGrace(guildId, userId);
   const afk = afkUsers.get(key) || null;
   afkUsers.delete(key);
   return afk;
+}
+
+// Cancel a pending "clear AFK after grace period" timer without touching AFK state.
+export function clearAfkVoiceGrace(guildId, userId) {
+  const key = getAfkKey(guildId, userId);
+  const timeout = afkVoiceGraceTimers.get(key);
+  if (timeout) {
+    clearTimeout(timeout);
+    afkVoiceGraceTimers.delete(key);
+  }
+}
+
+// Start a 1-minute grace period after which AFK is cleared, but only if the user
+// is still eligible at that time (isStillEligible() must return true). If a grace
+// timer is already running for this user we keep it, so the countdown starts from
+// when they first became eligible rather than resetting on every voice update.
+export function scheduleAfkVoiceGrace(guildId, userId, isStillEligible) {
+  const key = getAfkKey(guildId, userId);
+  if (afkVoiceGraceTimers.has(key)) return;
+
+  const timeout = setTimeout(() => {
+    afkVoiceGraceTimers.delete(key);
+    if (!afkUsers.has(key)) return;
+    if (isStillEligible()) {
+      afkUsers.delete(key);
+    }
+  }, AFK_VOICE_GRACE_MS);
+
+  afkVoiceGraceTimers.set(key, timeout);
 }
 
 export async function handleAfkMessage(message) {
@@ -48,7 +80,7 @@ export async function handleAfkMessage(message) {
   if (afkCommand) {
     const afk = setAfk(message.guildId, message.author.id, afkCommand[1]);
     await message.reply({
-      content: `💤 You are now AFK: ${afk.reason}`,
+      content: `You are now AFK: ${afk.reason}`,
       allowedMentions: { parse: [], repliedUser: false }
     });
     return;
@@ -57,7 +89,7 @@ export async function handleAfkMessage(message) {
   const previousAfk = clearAfk(message.guildId, message.author.id);
   if (previousAfk) {
     await message.reply({
-      content: `👋 Welcome back! I removed your AFK status after ${formatElapsedTime(previousAfk.startedAt)}.`,
+      content: `Welcome back! I removed your AFK status after ${formatElapsedTime(previousAfk.startedAt)}.`,
       allowedMentions: { parse: [], repliedUser: false }
     });
   }
@@ -69,7 +101,7 @@ export async function handleAfkMessage(message) {
     const afk = getAfk(message.guildId, user.id);
     if (afk) {
       mentionedAfkMembers.push(
-        `💤 ${user.username} is AFK: ${afk.reason} (${formatElapsedTime(afk.startedAt)} ago)`
+        `${user.username} is AFK: ${afk.reason} (${formatElapsedTime(afk.startedAt)} ago)`
       );
     }
   }

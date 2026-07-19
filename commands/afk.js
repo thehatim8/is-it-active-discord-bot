@@ -17,7 +17,7 @@ export default {
     const afk = setAfk(interaction.guildId, interaction.user.id, reason);
 
     await interaction.reply({
-      content: `💤 You are now AFK: ${afk.reason}`,
+      content: `You are now AFK: ${afk.reason}`,
       allowedMentions: { parse: [] }
     });
   }

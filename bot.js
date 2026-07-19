@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Collection, ActivityType, PermissionFlagsBits } from 'discord.js';
+import { Client, GatewayIntentBits, Collection, ActivityType, PermissionFlagsBits, Partials } from 'discord.js';
 import { config, validateConfig } from './config.js';
 import { db } from './database.js';
 import {
@@ -6,7 +6,13 @@ import {
   formatKickDeafenDuration,
   isVoiceStateDeafened
 } from './utils/kickDeafen.js';
-import { handleAfkMessage } from './utils/afk.js';
+import {
+  handleAfkMessage,
+  getAfk,
+  clearAfk,
+  clearAfkVoiceGrace,
+  scheduleAfkVoiceGrace
+} from './utils/afk.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -27,7 +33,10 @@ const client = new Client({
     GatewayIntentBits.MessageContent, // Privileged intent for text analytics
     GatewayIntentBits.GuildVoiceStates, // Required for voice chat duration logging
     GatewayIntentBits.GuildMembers, // Privileged intent for growth analytics
-  ]
+    GatewayIntentBits.GuildMessageReactions, // Clear AFK when a member reacts
+  ],
+  // Reactions on messages the bot hasn't cached arrive as partials.
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User]
 });
 
 // Create command collection
@@ -241,6 +250,27 @@ async function refreshKickDeafenGuild(guild) {
 
 client.refreshKickDeafenGuild = refreshKickDeafenGuild;
 
+// AFK + voice: an AFK member who joins voice is back UNLESS they are deafened.
+// If they are in voice and not deafened, clear their AFK after a 1-minute grace
+// period (so briefly connecting before deafening keeps them AFK). Being deafened
+// or leaving voice keeps them AFK and cancels any pending clear.
+function evaluateAfkVoiceState(voiceState) {
+  const guildId = voiceState.guild.id;
+  const userId = voiceState.id;
+
+  if (!getAfk(guildId, userId)) return;
+
+  if (!voiceState.channelId || isVoiceStateDeafened(voiceState)) {
+    clearAfkVoiceGrace(guildId, userId);
+    return;
+  }
+
+  scheduleAfkVoiceGrace(guildId, userId, () => {
+    const current = voiceState.guild.voiceStates.cache.get(userId);
+    return Boolean(current?.channelId) && !isVoiceStateDeafened(current);
+  });
+}
+
 // 3. Load Commands Dynamically
 const commandsPath = path.join(__dirname, 'commands');
 const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
@@ -329,6 +359,24 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   }
 
   await evaluateKickDeafenState(newState);
+  evaluateAfkVoiceState(newState);
+});
+
+// MESSAGE REACTION ADD Event: Reacting counts as activity, so clear AFK status
+client.on('messageReactionAdd', async (reaction, user) => {
+  try {
+    if (user.partial) user = await user.fetch();
+    if (user.bot) return;
+
+    if (reaction.partial) reaction = await reaction.fetch();
+
+    const guildId = reaction.message.guildId;
+    if (!guildId) return; // ignore DM reactions
+
+    clearAfk(guildId, user.id);
+  } catch (err) {
+    console.error('Failed to process reaction for AFK clearing:', err.message);
+  }
 });
 
 // GUILD MEMBER ADD Event: Logs growth joins
